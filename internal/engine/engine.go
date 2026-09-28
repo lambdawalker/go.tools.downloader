@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"downloader/internal/auth"
 	"downloader/internal/dashboard"
 	"downloader/internal/limiter"
 	"downloader/internal/model"
@@ -30,6 +31,7 @@ type Config struct {
 	RateLimitBps int64
 	MaxRetries   int
 	ProbeTimeout time.Duration
+	MasterPass   string
 }
 
 // Engine coordinates workers, rate limiting, persistence, and UI rendering for a download session.
@@ -39,10 +41,12 @@ type Engine struct {
 	downloader *transfer.Downloader
 	session    *model.Session
 	prober     *prober.Prober
+	authMgr    *auth.Manager
+	vault      *auth.Vault
 }
 
-// NewEngine initializes a new Engine instance with the given configuration and session store.
-func NewEngine(cfg Config, st *store.Store) *Engine {
+// NewEngine initializes a new Engine instance with the given configuration, store, auth manager, and encrypted vault.
+func NewEngine(cfg Config, st *store.Store, authMgr *auth.Manager, vault *auth.Vault) *Engine {
 	if cfg.WorkerCount <= 0 {
 		cfg.WorkerCount = 3
 	}
@@ -52,6 +56,16 @@ func NewEngine(cfg Config, st *store.Store) *Engine {
 	if cfg.OutputDir == "" {
 		cfg.OutputDir = "."
 	}
+	if authMgr == nil {
+		var err error
+		authMgr, err = auth.DefaultManager()
+		if err != nil {
+			authMgr = auth.NewManager(nil, auth.NewNonInteractivePrompter())
+		}
+	}
+	if vault == nil {
+		vault, _ = auth.DefaultVault()
+	}
 
 	rl := limiter.NewRateLimiter(cfg.RateLimitBps)
 
@@ -60,6 +74,8 @@ func NewEngine(cfg Config, st *store.Store) *Engine {
 		store:      st,
 		prober:     prober.NewProber(cfg.ProbeTimeout),
 		downloader: transfer.NewDownloader(rl),
+		authMgr:    authMgr,
+		vault:      vault,
 	}
 }
 
@@ -80,21 +96,60 @@ func (e *Engine) Run(ctx context.Context, session *model.Session) error {
 		cancel()
 	}()
 
-	// 1. Probing Phase
+	// 1. Check if vault unlock is required
+	needsVault := false
+	for _, job := range session.Jobs {
+		if job.AuthProfile != "" {
+			needsVault = true
+			break
+		}
+	}
+	if !needsVault && e.vault != nil && e.vault.Exists() {
+		// Vault exists; unlock it so domain defaults or stored profiles can be used
+		needsVault = true
+	}
+
+	if needsVault && e.vault != nil && e.vault.Exists() && !e.vault.IsUnlocked() {
+		if e.cfg.MasterPass != "" {
+			if err := e.vault.Unlock(e.cfg.MasterPass); err != nil {
+				return fmt.Errorf("failed unlocking vault with provided password: %w", err)
+			}
+		} else {
+			pass, err := auth.PromptPassword("[Vault] Enter Master Password to unlock credentials: ")
+			if err != nil {
+				return fmt.Errorf("failed prompting for master password: %w", err)
+			}
+			if err := e.vault.Unlock(pass); err != nil {
+				return fmt.Errorf("failed unlocking vault: %w", err)
+			}
+			fmt.Println("[Vault] Vault unlocked successfully.")
+		}
+	}
+
+	// 2. Resolve Auth Strategies & Probing Phase
 	fmt.Printf("Probing %d URLs for size and resumability...\n", len(session.Jobs))
 	for _, job := range session.Jobs {
 		if job.Status == model.StatusCompleted {
 			continue
 		}
 		job.Status = model.StatusProbing
-		if err := e.prober.PopulateJob(ctx, job); err != nil {
+
+		// Resolve domain or profile auth strategy
+		strat, authErr := e.resolveAuthStrategy(job)
+		if authErr != nil {
+			job.LastError = fmt.Sprintf("auth error: %v", authErr)
+			job.Status = model.StatusFailed
+			continue
+		}
+
+		if err := e.prober.PopulateJobWithAuth(ctx, job, strat); err != nil {
 			job.LastError = err.Error()
 		}
 		job.Status = model.StatusPending
 	}
 	_ = e.store.SaveSession(session)
 
-	// 2. Initialize Queue and Sort (Smallest to largest, unknown last)
+	// 3. Initialize Queue and Sort (Smallest to largest, unknown last)
 	var activeJobs []*model.FileJob
 	for _, j := range session.Jobs {
 		if j.Status != model.StatusCompleted {
@@ -121,7 +176,7 @@ func (e *Engine) Run(ctx context.Context, session *model.Session) error {
 	dash.Start(200 * time.Millisecond)
 	defer dash.Stop()
 
-	// 3. Watchdog Loop
+	// 4. Watchdog Loop
 	wdTicker := time.NewTicker(1 * time.Second)
 	defer wdTicker.Stop()
 	go func() {
@@ -152,7 +207,7 @@ func (e *Engine) Run(ctx context.Context, session *model.Session) error {
 		}
 	}()
 
-	// 4. Worker Pool
+	// 5. Worker Pool
 	var wg sync.WaitGroup
 	slotJobs := make([]*model.FileJob, e.cfg.WorkerCount)
 	var slotMu sync.Mutex
@@ -195,7 +250,13 @@ func (e *Engine) Run(ctx context.Context, session *model.Session) error {
 						q.Close()
 					}
 				} else if job.Status == model.StatusFailed {
-					if job.RetryCount < e.cfg.MaxRetries && ctx.Err() == nil {
+					// Distinguish auth error vs transient error
+					isAuthFatal := false
+					if auth.IsUnauthorized(errorsNew(job.LastError)) || auth.IsForbidden(errorsNew(job.LastError)) {
+						isAuthFatal = true
+					}
+
+					if !isAuthFatal && job.RetryCount < e.cfg.MaxRetries && ctx.Err() == nil {
 						job.RetryCount++
 						backoff := time.Duration(1<<job.RetryCount) * time.Second
 						time.Sleep(backoff)
@@ -224,6 +285,39 @@ func (e *Engine) Run(ctx context.Context, session *model.Session) error {
 	return nil
 }
 
+// resolveAuthStrategy determines the Strategy for a job checking explicit profile, vault domain default, and domain cache.
+func (e *Engine) resolveAuthStrategy(job *model.FileJob) (auth.Strategy, error) {
+	// 1. Explicit profile specified in URL list (e.g. auth=my-profile)
+	if job.AuthProfile != "" {
+		if e.vault != nil && e.vault.IsUnlocked() {
+			return e.vault.ResolveStrategy(job.AuthProfile, job.URL)
+		}
+		return nil, fmt.Errorf("job requires auth profile %q, but encrypted vault is locked or not found", job.AuthProfile)
+	}
+
+	// 2. Vault domain default mapping
+	if e.vault != nil && e.vault.IsUnlocked() {
+		strat, err := e.vault.ResolveStrategy("", job.URL)
+		if err == nil && strat.Type() != auth.MethodNone {
+			return strat, nil
+		}
+	}
+
+	// 3. Fallback to domain cache (~/.downloader/auth) or prompter
+	if e.authMgr != nil {
+		return e.authMgr.ResolveURL(job.URL)
+	}
+
+	return auth.NewAnonymousStrategy(), nil
+}
+
+func errorsNew(s string) error {
+	if s == "" {
+		return nil
+	}
+	return fmt.Errorf("%s", s)
+}
+
 // executeJob processes an individual download job under watchdog supervision.
 func (e *Engine) executeJob(ctx context.Context, job *model.FileJob, wd *watchdog.Watchdog) {
 	jobCtx, jobCancel := context.WithCancel(ctx)
@@ -233,7 +327,14 @@ func (e *Engine) executeJob(ctx context.Context, job *model.FileJob, wd *watchdo
 	wd.RegisterStream(job, jobCancel)
 	defer wd.UnregisterStream(job.ID)
 
-	err := e.downloader.Download(jobCtx, job, e.cfg.OutputDir)
+	strat, authErr := e.resolveAuthStrategy(job)
+	if authErr != nil {
+		job.Status = model.StatusFailed
+		job.LastError = fmt.Sprintf("auth error: %v", authErr)
+		return
+	}
+
+	err := e.downloader.Download(jobCtx, job, e.cfg.OutputDir, strat)
 	if err != nil {
 		if ctx.Err() != nil {
 			job.Status = model.StatusPaused
@@ -244,6 +345,14 @@ func (e *Engine) executeJob(ctx context.Context, job *model.FileJob, wd *watchdo
 		}
 		job.Status = model.StatusFailed
 		job.LastError = err.Error()
+
+		// If rate-limited with a Retry-After header, sleep for Retry-After duration
+		if authErr, ok := auth.AsAuthError(err); ok && authErr.Kind == auth.KindRateLimited && authErr.RetryAfter > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(authErr.RetryAfter):
+			}
+		}
 	} else {
 		job.Status = model.StatusCompleted
 	}

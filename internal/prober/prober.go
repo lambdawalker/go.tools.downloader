@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"downloader/internal/auth"
 	"downloader/internal/model"
 )
 
@@ -28,7 +29,8 @@ type ProbeResult struct {
 
 // Prober inspects target URLs using HEAD and Range GET requests.
 type Prober struct {
-	client *http.Client
+	client  *http.Client
+	timeout time.Duration
 }
 
 // NewProber initializes a Prober configured with the specified HTTP request timeout.
@@ -37,6 +39,7 @@ func NewProber(timeout time.Duration) *Prober {
 		timeout = 15 * time.Second
 	}
 	return &Prober{
+		timeout: timeout,
 		client: &http.Client{
 			Timeout: timeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -51,6 +54,11 @@ func NewProber(timeout time.Duration) *Prober {
 
 // ProbeURL queries targetURL using HEAD (or Range GET fallback) to determine file size, range support, and filename.
 func (p *Prober) ProbeURL(ctx context.Context, targetURL string) (*ProbeResult, error) {
+	return p.ProbeURLWithAuth(ctx, targetURL, nil)
+}
+
+// ProbeURLWithAuth queries targetURL using HEAD (or Range GET fallback) applying domain-scoped auth credentials.
+func (p *Prober) ProbeURLWithAuth(ctx context.Context, targetURL string, authStrategy auth.Strategy) (*ProbeResult, error) {
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %w", err)
@@ -60,11 +68,13 @@ func (p *Prober) ProbeURL(ctx context.Context, targetURL string) (*ProbeResult, 
 		TotalSize: -1,
 	}
 
+	scopedClient := auth.NewScopedHTTPClient(parsedURL.Host, authStrategy, p.timeout)
+
 	// 1. Try HEAD request first
 	headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, targetURL, nil)
 	if err == nil {
 		headReq.Header.Set("User-Agent", "Go-Concurrent-Downloader/1.0")
-		resp, headErr := p.client.Do(headReq)
+		resp, headErr := scopedClient.Do(headReq)
 		if headErr == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -72,9 +82,8 @@ func (p *Prober) ProbeURL(ctx context.Context, targetURL string) (*ProbeResult, 
 				if result.TotalSize > 0 && result.ResolvedFilename != "" {
 					return result, nil
 				}
-			} else if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-				result.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
-				return result, fmt.Errorf("server busy, status: %d", resp.StatusCode)
+			} else if authErr := auth.MapStatusCode(resp.StatusCode, parsedURL.Hostname(), targetURL, resp.Header, nil); authErr != nil {
+				return result, authErr
 			}
 		}
 	}
@@ -87,20 +96,21 @@ func (p *Prober) ProbeURL(ctx context.Context, targetURL string) (*ProbeResult, 
 	getReq.Header.Set("User-Agent", "Go-Concurrent-Downloader/1.0")
 	getReq.Header.Set("Range", "bytes=0-0")
 
-	resp, err := p.client.Do(getReq)
+	resp, err := scopedClient.Do(getReq)
 	if err != nil {
-		// If both HEAD and Range GET fail, return default fallback
 		result.ResolvedFilename = sanitizeFilename(extractFilenameFromURL(parsedURL), "")
 		return result, fmt.Errorf("probe request failed: %w", err)
 	}
-	// Immediately close body to prevent downloading the whole file if 200 OK was returned!
 	defer resp.Body.Close()
+
+	if authErr := auth.MapStatusCode(resp.StatusCode, parsedURL.Hostname(), targetURL, resp.Header, nil); authErr != nil {
+		return result, authErr
+	}
 
 	if resp.StatusCode == http.StatusPartialContent { // 206
 		result.AcceptRanges = true
 		contentRange := resp.Header.Get("Content-Range")
 		if contentRange != "" {
-			// Format: bytes 0-0/total_size
 			parts := strings.Split(contentRange, "/")
 			if len(parts) == 2 && parts[1] != "*" {
 				if size, parseErr := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); parseErr == nil {
@@ -109,7 +119,6 @@ func (p *Prober) ProbeURL(ctx context.Context, targetURL string) (*ProbeResult, 
 			}
 		}
 	} else if resp.StatusCode == http.StatusOK { // 200
-		// Server ignored range, but we have Content-Length of whole file
 		if resp.ContentLength > 0 {
 			result.TotalSize = resp.ContentLength
 		}
@@ -241,7 +250,12 @@ func parseRetryAfter(val string) time.Duration {
 
 // PopulateJob executes ProbeURL for the given job and enriches its fields with the discovered metadata.
 func (p *Prober) PopulateJob(ctx context.Context, job *model.FileJob) error {
-	res, err := p.ProbeURL(ctx, job.URL)
+	return p.PopulateJobWithAuth(ctx, job, nil)
+}
+
+// PopulateJobWithAuth executes ProbeURLWithAuth for the job and enriches its fields with discovered metadata.
+func (p *Prober) PopulateJobWithAuth(ctx context.Context, job *model.FileJob, authStrategy auth.Strategy) error {
+	res, err := p.ProbeURLWithAuth(ctx, job.URL, authStrategy)
 	if res != nil {
 		if res.TotalSize > 0 {
 			job.TotalSize = res.TotalSize

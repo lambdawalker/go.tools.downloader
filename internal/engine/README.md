@@ -1,20 +1,20 @@
 # Package `engine` (`internal/engine`)
 
-`internal/engine` orchestrates the core execution pipeline, linking all subsystem components together into a unified concurrent download engine.
+`internal/engine` is the central orchestrator connecting workers, queue scheduling, watchdog monitoring, session persistence, and UI rendering.
 
 ## Purpose
 
 The package is responsible for:
-- Initializing subsystem components (prober, queue, watchdog, downloader, dashboard, and storage).
-- Executing the pre-flight URL probing phase to discover file metadata before transferring data.
-- Managing the pool of worker goroutines consuming jobs from the prioritized queue.
-- Running the watchdog monitoring loop to detect stalled or slow streams and trigger demotions.
-- Handling graceful shutdown upon receiving OS termination signals (`SIGINT`, `SIGTERM`), pausing jobs cleanly.
-- Persisting session states periodically to disk and outputting final completion summaries.
+- Initializing the worker pool based on user configuration.
+- Probing URLs prior to download and initializing jobs.
+- Feeding jobs into the Shortest-Job-First (SJF) queue.
+- Coordinating transfer execution with rate limiting and retry backoff.
+- Hooking active streams into the watchdog to detect stalls and slow transfers.
+- Saving session states to disk on interval and on clean termination.
 
-## Key Types & Functions
+## Key Types & Methods
 
-- [`Config`](file:///D:/dev/downloader/internal/engine/engine.go#L24): Configuration parameters governing worker pool size, output directory, rate limits, and timeouts.
-- [`Engine`](file:///D:/dev/downloader/internal/engine/engine.go#L34): Central orchestrator coordinating workers, watchdog, and storage.
-- [`NewEngine(cfg Config, st *store.Store) *Engine`](file:///D:/dev/downloader/internal/engine/engine.go#L43): Creates and wires an Engine instance.
-- [`Run(ctx context.Context, session *model.Session) error`](file:///D:/dev/downloader/internal/engine/engine.go#L64): Executes the complete lifecycle of a download session.
+- [`Config`](engine.go#L24): Configuration parameters governing worker pool size, output directory, rate limits, and timeouts.
+- [`Engine`](engine.go#L34): Central orchestrator coordinating workers, watchdog, and storage.
+- [`NewEngine(cfg Config, st *store.Store, authMgr *auth.Manager, vault *auth.Vault) *Engine`](engine.go#L43): Creates and wires an Engine instance.
+- [`Run(ctx context.Context, session *model.Session) error`](engine.go#L64): Executes the complete lifecycle of a download session.

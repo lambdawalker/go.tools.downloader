@@ -1,17 +1,22 @@
 // Package transfer implements HTTP file streaming, range-based resumption,
-// sliding-window throughput tracking, and atomic final file placement.
+// sliding-window throughput tracking, and grab-powered downloads with authentication support.
 package transfer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/cavaliergopher/grab/v3"
+
+	"downloader/internal/auth"
 	"downloader/internal/checksum"
 	"downloader/internal/limiter"
 	"downloader/internal/model"
@@ -66,24 +71,88 @@ func (st *SpeedTracker) Update(currentBytes int64) float64 {
 	return st.currentSpeed
 }
 
-// Downloader executes resumable HTTP downloads with optional rate limiting.
+// DownloadResult summarizes details of a completed transfer.
+type DownloadResult struct {
+	Filename      string
+	BytesComplete int64
+	TotalSize     int64
+	DidResume     bool
+	Duration      time.Duration
+	ActualSHA256  string
+}
+
+// Downloader executes resumable HTTP downloads via grab with rate limiting and authentication scoping.
 type Downloader struct {
-	client  *http.Client
 	limiter *limiter.RateLimiter
 }
 
 // NewDownloader creates a new Downloader configured with the provided rate limiter (or nil if unlimited).
 func NewDownloader(rl *limiter.RateLimiter) *Downloader {
 	return &Downloader{
-		client: &http.Client{
-			Timeout: 0, // No blanket timeout; controlled by context & watchdog
-		},
 		limiter: rl,
 	}
 }
 
+// DownloadURL downloads the targetURL to destination using grab and the supplied authentication strategy.
+// The download is site-agnostic, strictly scoping credentials to targetURL's domain.
+func (d *Downloader) DownloadURL(ctx context.Context, targetURL, destination string, authStrategy auth.Strategy) (*DownloadResult, error) {
+	if authStrategy == nil {
+		authStrategy = auth.NewAnonymousStrategy()
+	}
+
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target URL: %w", err)
+	}
+
+	// 1. Configure domain-scoped HTTP client
+	scopedHTTP := auth.NewScopedHTTPClient(parsedURL.Host, authStrategy, 0)
+
+	// 2. Build Grab client
+	grabClient := grab.NewClient()
+	grabClient.HTTPClient = scopedHTTP
+	grabClient.UserAgent = "Go-Concurrent-Downloader/1.0"
+
+	// 3. Create Grab request
+	req, err := grab.NewRequest(destination, targetURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed creating grab request: %w", err)
+	}
+	req = req.WithContext(ctx)
+
+	if d.limiter != nil {
+		req.RateLimiter = d.limiter
+	}
+
+	// 4. Start transfer
+	resp := grabClient.Do(req)
+
+	select {
+	case <-ctx.Done():
+		_ = resp.Cancel()
+		return nil, ctx.Err()
+	case <-resp.Done:
+		if err := resp.Err(); err != nil {
+			return nil, d.mapError(err, parsedURL.Hostname(), targetURL, resp)
+		}
+	}
+
+	return &DownloadResult{
+		Filename:      resp.Filename,
+		BytesComplete: resp.BytesComplete(),
+		TotalSize:     resp.Size(),
+		DidResume:     resp.DidResume,
+		Duration:      resp.Duration(),
+	}, nil
+}
+
 // Download downloads the file specified in job into outputDir, resuming from existing .part files if supported.
-func (d *Downloader) Download(ctx context.Context, job *model.FileJob, outputDir string) error {
+// Authentication credentials from authStrategy are applied strictly to the target domain.
+func (d *Downloader) Download(ctx context.Context, job *model.FileJob, outputDir string, authStrategy auth.Strategy) error {
+	if authStrategy == nil {
+		authStrategy = auth.NewAnonymousStrategy()
+	}
+
 	if job.ResolvedFilename == "" {
 		job.ResolvedFilename = "download.bin"
 	}
@@ -105,146 +174,113 @@ func (d *Downloader) Download(ctx context.Context, job *model.FileJob, outputDir
 		}
 	}
 
-	// 2. Inspect existing .part file size
-	var existingBytes int64 = 0
-	if info, err := os.Stat(partFile); err == nil {
-		existingBytes = info.Size()
-	}
-
-	// If .part is already full size, verify and promote
-	if job.TotalSize > 0 && existingBytes == job.TotalSize {
-		if err := os.Rename(partFile, targetFile); err == nil {
-			if ok, hash, _ := checksum.VerifyFile(targetFile, job.ExpectedSHA256); ok {
-				job.ActualSHA256 = hash
-				job.DownloadedBytes = existingBytes
-				job.Status = model.StatusCompleted
-				return nil
-			}
-		}
-	}
-
-	// 3. Construct HTTP request with Range & If-Range headers
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, job.URL, nil)
+	parsedURL, err := url.Parse(job.URL)
 	if err != nil {
-		return fmt.Errorf("failed creating request: %w", err)
-	}
-	req.Header.Set("User-Agent", "Go-Concurrent-Downloader/1.0")
-
-	if existingBytes > 0 && job.AcceptRanges {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingBytes))
-		// Only attach strong ETags to If-Range (RFC 7232: weak ETags forbidden in range requests)
-		if job.ETag != "" && !strings.HasPrefix(job.ETag, "W/") {
-			req.Header.Set("If-Range", job.ETag)
-		} else if job.LastModified != "" {
-			req.Header.Set("If-Range", job.LastModified)
-		}
+		return fmt.Errorf("invalid job URL: %w", err)
 	}
 
-	resp, err := d.client.Do(req)
+	// 2. Configure domain-scoped HTTP client
+	scopedHTTP := auth.NewScopedHTTPClient(parsedURL.Host, authStrategy, 0)
+
+	// 3. Build Grab client
+	grabClient := grab.NewClient()
+	grabClient.HTTPClient = scopedHTTP
+	grabClient.UserAgent = "Go-Concurrent-Downloader/1.0"
+
+	// 4. Create Grab request targeting the .part file for resumable atomic placement
+	req, err := grab.NewRequest(partFile, job.URL)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed creating grab request: %w", err)
 	}
-	defer resp.Body.Close()
+	req = req.WithContext(ctx)
 
-	// 4. Handle HTTP response codes
-	var outFile *os.File
-	var startOffset int64 = 0
-
-	switch resp.StatusCode {
-	case http.StatusPartialContent: // 206
-		outFile, err = os.OpenFile(partFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return fmt.Errorf("failed opening part file: %w", err)
-		}
-		startOffset = existingBytes
-	case http.StatusOK: // 200
-		// Server ignored range or new download; truncate part file
-		outFile, err = os.OpenFile(partFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-		if err != nil {
-			return fmt.Errorf("failed creating part file: %w", err)
-		}
-		startOffset = 0
-		if resp.ContentLength > 0 {
-			job.TotalSize = resp.ContentLength
-		}
-	case http.StatusRequestedRangeNotSatisfiable: // 416
-		// Might already be complete or file changed on server
-		if existingBytes > 0 {
-			_ = os.Remove(partFile)
-		}
-		return fmt.Errorf("range not satisfiable (416)")
-	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
-		return fmt.Errorf("server throttled (HTTP %d)", resp.StatusCode)
-	default:
-		return fmt.Errorf("unexpected HTTP status: %d", resp.StatusCode)
+	if d.limiter != nil {
+		req.RateLimiter = d.limiter
 	}
-	defer outFile.Close()
 
-	// 5. Stream data with rate limiting, speed tracking, and progress reporting
-	speedTracker := NewSpeedTracker(30 * time.Second)
-	throttledBody := limiter.NewThrottledReader(resp.Body, d.limiter, ctx)
+	// Attach checksum if expected
+	if job.ExpectedSHA256 != "" {
+		if sumBytes, err := hex.DecodeString(job.ExpectedSHA256); err == nil {
+			req.SetChecksum(sha256.New(), sumBytes, false)
+		}
+	}
 
-	buf := make([]byte, 64*1024)
-	downloaded := startOffset
-	job.SetProgress(downloaded, 0)
+	// 5. Start transfer
+	resp := grabClient.Do(req)
 
-	lastProgressFlush := time.Now()
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
 
 	for {
-		nr, rerr := throttledBody.Read(buf)
-		if nr > 0 {
-			nw, werr := outFile.Write(buf[:nr])
-			if werr != nil {
-				return fmt.Errorf("write error: %w", werr)
-			}
-			if nw > 0 {
-				downloaded += int64(nw)
+		select {
+		case <-ctx.Done():
+			_ = resp.Cancel()
+			return ctx.Err()
+
+		case <-ticker.C:
+			job.SetProgress(resp.BytesComplete(), resp.BytesPerSecond())
+
+		case <-resp.Done:
+			// Final update
+			job.SetProgress(resp.BytesComplete(), resp.BytesPerSecond())
+
+			if err := resp.Err(); err != nil {
+				return d.mapError(err, parsedURL.Hostname(), job.URL, resp)
 			}
 
-			// Update speed & progress periodically
-			if time.Since(lastProgressFlush) >= 100*time.Millisecond {
-				curSpeed := speedTracker.Update(downloaded)
-				job.SetProgress(downloaded, curSpeed)
-				lastProgressFlush = time.Now()
+			// Atomic promotion from .part to final destination
+			if err := os.Rename(partFile, targetFile); err != nil {
+				return fmt.Errorf("failed promoting .part file: %w", err)
 			}
+
+			// Validate SHA-256 and store actual hash
+			if ok, hash, chkErr := checksum.VerifyFile(targetFile, job.ExpectedSHA256); !ok {
+				if chkErr != nil {
+					return fmt.Errorf("checksum calculation error: %w", chkErr)
+				}
+				job.ActualSHA256 = hash
+				return fmt.Errorf("checksum mismatch: expected %s, got %s", job.ExpectedSHA256, hash)
+			} else {
+				job.ActualSHA256 = hash
+			}
+
+			job.DownloadedBytes = resp.BytesComplete()
+			job.Status = model.StatusCompleted
+			return nil
 		}
+	}
+}
 
-		if rerr != nil {
-			// Flush file buffer before checking EOF or error
-			_ = outFile.Sync()
-			if rerr == io.EOF {
-				break
-			}
-			return rerr
+// mapError translates grab and HTTP status errors into typed auth.AuthError if applicable.
+func (d *Downloader) mapError(err error, domain, targetURL string, resp *grab.Response) error {
+	if err == nil {
+		return nil
+	}
+
+	// Check if already an AuthError
+	if auth.IsAuthError(err) {
+		return err
+	}
+
+	// Inspect HTTP status code
+	var statusErr grab.StatusCodeError
+	if errors.As(err, &statusErr) {
+		code := int(statusErr)
+		var headers http.Header
+		if resp != nil && resp.HTTPResponse != nil {
+			headers = resp.HTTPResponse.Header
+		}
+		if authErr := auth.MapStatusCode(code, domain, targetURL, headers, err); authErr != nil {
+			return authErr
 		}
 	}
 
-	_ = outFile.Sync()
-	_ = outFile.Close()
-
-	// 6. Complete and promote
-	job.DownloadedBytes = downloaded
-	if job.TotalSize > 0 && downloaded < job.TotalSize {
-		return fmt.Errorf("incomplete download: expected %d bytes, got %d", job.TotalSize, downloaded)
-	}
-
-	// SHA-256 Checksum check if specified
-	if job.ExpectedSHA256 != "" {
-		match, actual, err := checksum.VerifyFile(partFile, job.ExpectedSHA256)
-		if err != nil {
-			return fmt.Errorf("checksum calculation error: %w", err)
-		}
-		job.ActualSHA256 = actual
-		if !match {
-			return fmt.Errorf("checksum mismatch: expected %s, got %s", job.ExpectedSHA256, actual)
+	if resp != nil && resp.HTTPResponse != nil {
+		code := resp.HTTPResponse.StatusCode
+		if authErr := auth.MapStatusCode(code, domain, targetURL, resp.HTTPResponse.Header, err); authErr != nil {
+			return authErr
 		}
 	}
 
-	// Atomic promotion from .part to final destination
-	if err := os.Rename(partFile, targetFile); err != nil {
-		return fmt.Errorf("failed promoting .part file: %w", err)
-	}
-
-	job.Status = model.StatusCompleted
-	return nil
+	return err
 }

@@ -1,0 +1,111 @@
+# .goreleaser.yaml
+# Specification: https://goreleaser.com
+version: 2
+
+project_name: downloader
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: downloader
+    main: ./cmd/downloader
+    binary: downloader
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: default
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - docs/*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# Linux Packages (.deb and .rpm)
+nfpms:
+  - id: packages
+    package_name: downloader
+    vendor: Downloader Project
+    homepage: https://github.com/yourorg/downloader
+    maintainer: Downloader Maintainers <maintainers@example.com>
+    description: High-performance, concurrent resumable CLI download manager with encrypted credential vault
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/local/bin
+    section: utils
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/downloader/README.md
+
+# macOS & Linux Homebrew Tap
+brews:
+  - name: downloader
+    repository:
+      owner: yourorg
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/yourorg/downloader
+    description: High-performance, concurrent resumable CLI download manager with encrypted credential vault
+    license: MIT
+    test: |
+      system "#{bin}/downloader", "-h"
+
+# Windows Scoop Bucket
+scoops:
+  - name: downloader
+    repository:
+      owner: yourorg
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
+    homepage: https://github.com/yourorg/downloader
+    description: High-performance, concurrent resumable CLI download manager with encrypted credential vault
+    license: MIT
+
+# GitHub Releases
+release:
+  github:
+    owner: yourorg
+    name: downloader
+  prerelease: auto
+  mode: replace
+  header: |
+    ## Downloader {{ .Tag }} ({{ .Date }})
+
+    Welcome to the latest release of the Go Concurrent Resumable Downloader.
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
