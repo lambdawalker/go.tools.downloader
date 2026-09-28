@@ -58,6 +58,7 @@ type FileJob struct {
 	AcceptRanges     bool        `json:"accept_ranges"`
 	ExpectedSHA256   string      `json:"expected_sha256,omitempty"`
 	ActualSHA256     string      `json:"actual_sha256,omitempty"`
+	AuthProfile      string      `json:"auth_profile,omitempty"`
 	Status           JobStatus   `json:"status"`
 	StreamState      StreamState `json:"stream_state"`
 	DemotedOnce      bool        `json:"demoted_once"`
