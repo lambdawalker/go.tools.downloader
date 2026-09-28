@@ -163,7 +163,7 @@ func (e *Engine) Run(ctx context.Context, session *model.Session) error {
 		return nil
 	}
 
-	var remainingJobs int64 = int64(len(activeJobs))
+	remainingJobs := int64(len(activeJobs))
 
 	q := queue.NewQueue(activeJobs)
 	go func() {

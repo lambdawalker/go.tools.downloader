@@ -64,7 +64,7 @@ func (s *AnonymousStrategy) Type() MethodType {
 }
 
 // Apply does not modify the request.
-func (s *AnonymousStrategy) Apply(req *http.Request) error {
+func (s *AnonymousStrategy) Apply(_ *http.Request) error {
 	return nil
 }
 

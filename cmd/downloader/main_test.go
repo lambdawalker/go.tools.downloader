@@ -74,11 +74,7 @@ func TestParseURLLine(t *testing.T) {
 }
 
 func TestParseURLFile(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "url_file_test_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	content := `# Sample URLs file
 https://api.github.com/archive.zip auth=gh-work sha256=2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824

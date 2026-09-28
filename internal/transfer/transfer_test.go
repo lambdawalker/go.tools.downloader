@@ -16,6 +16,19 @@ import (
 	"downloader/internal/model"
 )
 
+func TestSpeedTracker(t *testing.T) {
+	st := NewSpeedTracker(500 * time.Millisecond)
+	spd := st.Update(1024)
+	if spd < 0 {
+		t.Fatalf("unexpected negative speed")
+	}
+	time.Sleep(150 * time.Millisecond)
+	spd2 := st.Update(2048)
+	if spd2 <= 0 {
+		t.Fatalf("expected positive speed after bytes update, got %f", spd2)
+	}
+}
+
 func TestGrabDownloadSuccessWithAuth(t *testing.T) {
 	content := "Hello Grab Resumable Streaming with Auth!"
 	h := sha256.Sum256([]byte(content))
@@ -33,11 +46,7 @@ func TestGrabDownloadSuccessWithAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpDir, err := os.MkdirTemp("", "transfer_grab_test_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	d := NewDownloader(nil)
 	job := &model.FileJob{
@@ -48,7 +57,7 @@ func TestGrabDownloadSuccessWithAuth(t *testing.T) {
 	}
 
 	strat := auth.NewBearerStrategy("test-grab-token")
-	err = d.Download(context.Background(), job, tmpDir, strat)
+	err := d.Download(context.Background(), job, tmpDir, strat)
 	if err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
@@ -71,16 +80,12 @@ func TestGrabDownloadSuccessWithAuth(t *testing.T) {
 }
 
 func TestGrabDownloadAuthError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	}))
 	defer server.Close()
 
-	tmpDir, err := os.MkdirTemp("", "transfer_grab_err_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	d := NewDownloader(nil)
 	job := &model.FileJob{
@@ -89,7 +94,7 @@ func TestGrabDownloadAuthError(t *testing.T) {
 		ResolvedFilename: "unauth.txt",
 	}
 
-	err = d.Download(context.Background(), job, tmpDir, auth.NewAnonymousStrategy())
+	err := d.Download(context.Background(), job, tmpDir, auth.NewAnonymousStrategy())
 	if err == nil {
 		t.Fatalf("expected auth error, got nil")
 	}
@@ -103,17 +108,13 @@ func TestGrabDownloadAuthError(t *testing.T) {
 }
 
 func TestGrabDownloadRateLimited(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "45")
 		http.Error(w, "Rate Limited", http.StatusTooManyRequests)
 	}))
 	defer server.Close()
 
-	tmpDir, err := os.MkdirTemp("", "transfer_grab_rate_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	d := NewDownloader(nil)
 	job := &model.FileJob{
@@ -122,7 +123,7 @@ func TestGrabDownloadRateLimited(t *testing.T) {
 		ResolvedFilename: "rate.txt",
 	}
 
-	err = d.Download(context.Background(), job, tmpDir, nil)
+	err := d.Download(context.Background(), job, tmpDir, nil)
 	if err == nil {
 		t.Fatalf("expected rate limit error, got nil")
 	}

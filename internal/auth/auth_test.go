@@ -1,10 +1,11 @@
 package auth
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,8 +38,7 @@ func TestStrategies(t *testing.T) {
 	}
 
 	// 3. Bearer with env var
-	os.Setenv("TEST_AUTH_TOKEN", "env-token-xyz")
-	defer os.Unsetenv("TEST_AUTH_TOKEN")
+	t.Setenv("TEST_AUTH_TOKEN", "env-token-xyz")
 	bearerEnv := NewBearerStrategy("env:TEST_AUTH_TOKEN")
 	req, _ = http.NewRequest("GET", "https://example.com/test", nil)
 	if err := bearerEnv.Apply(req); err != nil {
@@ -119,7 +119,7 @@ func TestCrossDomainRedirectStripping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Verify that the CDN server did NOT receive any auth headers!
 	if receivedAuthHeader != "" {
@@ -131,11 +131,7 @@ func TestCrossDomainRedirectStripping(t *testing.T) {
 }
 
 func TestStorePersistenceAndDomainMatching(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "auth_store_test_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	cfgPath := filepath.Join(tmpDir, "config.json")
 	store, err := NewStore(cfgPath)
@@ -191,16 +187,12 @@ func TestStorePersistenceAndDomainMatching(t *testing.T) {
 }
 
 func TestManagerAndPrompter(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "auth_mgr_test_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	store, _ := NewStore(filepath.Join(tmpDir, "config.json"))
 
 	promptCount := 0
-	prompter := NewCallbackPrompter(func(domain string) (*Entry, error) {
+	prompter := NewCallbackPrompter(func(_ string) (*Entry, error) {
 		promptCount++
 		return &Entry{
 			Method: MethodBearer,
@@ -232,6 +224,35 @@ func TestManagerAndPrompter(t *testing.T) {
 	}
 	if promptCount != 1 {
 		t.Fatalf("expected prompter to NOT be called again, but promptCount=%d", promptCount)
+	}
+}
+
+func TestCustomTerminalPrompter(t *testing.T) {
+	// Simulate user entering "2" then "my-token\n"
+	input := strings.NewReader("2\nmy-token\n")
+	output := &bytes.Buffer{}
+	prompter := NewCustomTerminalPrompter(input, output)
+
+	entry, err := prompter.PromptAuth("github.com")
+	if err != nil {
+		t.Fatalf("PromptAuth failed: %v", err)
+	}
+	if entry.Method != MethodBearer || entry.Token != "my-token" {
+		t.Fatalf("unexpected entry: %+v", entry)
+	}
+
+	// Test NonInteractivePrompter
+	nonInteractive := NewNonInteractivePrompter()
+	entryAnon, err := nonInteractive.PromptAuth("any.com")
+	if err != nil {
+		t.Fatalf("NonInteractivePrompter failed: %v", err)
+	}
+	if entryAnon.Method != MethodNone {
+		t.Fatalf("expected MethodNone, got %s", entryAnon.Method)
+	}
+
+	if ErrPromptAborted.Error() != "authentication prompt canceled by user" {
+		t.Fatalf("unexpected ErrPromptAborted: %v", ErrPromptAborted)
 	}
 }
 

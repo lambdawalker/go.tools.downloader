@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -91,7 +92,7 @@ func IsRateLimited(err error) bool {
 
 // ParseRetryAfter parses standard HTTP Retry-After headers in seconds or RFC 1123 date format.
 func ParseRetryAfter(headerVal string) time.Duration {
-	headerVal = headerVal
+	headerVal = strings.TrimSpace(headerVal)
 	if headerVal == "" {
 		return 0
 	}

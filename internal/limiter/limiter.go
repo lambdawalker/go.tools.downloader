@@ -23,14 +23,14 @@ func NewRateLimiter(bytesPerSec int64) *RateLimiter {
 	if bytesPerSec <= 0 {
 		return nil
 	}
-	cap := float64(bytesPerSec)
-	if cap < 64*1024 {
-		cap = 64 * 1024
+	capacity := float64(bytesPerSec)
+	if capacity < 64*1024 {
+		capacity = 64 * 1024
 	}
 	return &RateLimiter{
 		bytesPerSec:  float64(bytesPerSec),
-		capacity:     cap,
-		tokens:       cap,
+		capacity:     capacity,
+		tokens:       capacity,
 		lastRefilled: time.Now(),
 	}
 }

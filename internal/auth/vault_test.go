@@ -9,11 +9,7 @@ import (
 )
 
 func TestVaultInitAndUnlock(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "vault_test_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	vaultPath := filepath.Join(tmpDir, "vault.enc")
 	v := NewVault(vaultPath)
@@ -68,7 +64,7 @@ func TestVaultInitAndUnlock(t *testing.T) {
 
 	// 4. Unlock with incorrect password
 	v3 := NewVault(vaultPath)
-	err = v3.Unlock("WrongPassword!")
+	err := v3.Unlock("WrongPassword!")
 	if err == nil {
 		t.Fatalf("expected error unlocking with wrong password, got nil")
 	}
@@ -78,11 +74,7 @@ func TestVaultInitAndUnlock(t *testing.T) {
 }
 
 func TestVaultTamperDetection(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "vault_tamper_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	vaultPath := filepath.Join(tmpDir, "vault.enc")
 	v := NewVault(vaultPath)
@@ -112,11 +104,7 @@ func TestVaultTamperDetection(t *testing.T) {
 }
 
 func TestVaultChangePassword(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "vault_pw_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	vaultPath := filepath.Join(tmpDir, "vault.enc")
 	v := NewVault(vaultPath)
@@ -151,11 +139,7 @@ func TestVaultChangePassword(t *testing.T) {
 }
 
 func TestVaultProfileAndDomainResolutions(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "vault_resolve_*")
-	if err != nil {
-		t.Fatalf("failed creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	vaultPath := filepath.Join(tmpDir, "vault.enc")
 	v := NewVault(vaultPath)

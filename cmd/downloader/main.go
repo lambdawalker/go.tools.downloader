@@ -21,6 +21,11 @@ import (
 	"downloader/internal/store"
 )
 
+// printError prints formatted error output to stderr, ignoring write errors.
+func printError(format string, args ...any) {
+	_, _ = fmt.Fprintf(os.Stderr, format, args...)
+}
+
 // main is the CLI entry point dispatching subcommands or launching downloads.
 func main() {
 	if len(os.Args) > 1 {
@@ -47,13 +52,13 @@ func main() {
 func handleList() {
 	st, err := store.DefaultStore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error accessing storage: %v\n", err)
+		printError("Error accessing storage: %v\n", err)
 		os.Exit(1)
 	}
 
 	sessions, err := st.ListSessions()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error listing sessions: %v\n", err)
+		printError("Error listing sessions: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -86,13 +91,13 @@ func handleStatus(args []string) {
 	name := args[0]
 	st, err := store.DefaultStore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		printError("Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	sess, err := st.LoadSession(name)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		printError("Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -111,7 +116,7 @@ func handleStatus(args []string) {
 func handleAuth(args []string) {
 	vault, err := auth.DefaultVault()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error accessing vault path: %v\n", err)
+		printError("Error accessing vault path: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -174,11 +179,11 @@ func handleVaultSubcommand(vault *auth.Vault, args []string) {
 		}
 		pass, err := auth.ConfirmPassword("[Vault] Enter Master Password for new vault: ")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			printError("Error: %v\n", err)
 			os.Exit(1)
 		}
 		if err := vault.Init(pass); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed initializing vault: %v\n", err)
+			printError("Failed initializing vault: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("[Success] Encrypted credential vault initialized successfully at:", vault.Path())
@@ -190,20 +195,20 @@ func handleVaultSubcommand(vault *auth.Vault, args []string) {
 		}
 		oldPass, err := auth.PromptPassword("[Vault] Enter current Master Password: ")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			printError("Error: %v\n", err)
 			os.Exit(1)
 		}
 		if err := vault.Unlock(oldPass); err != nil {
-			fmt.Fprintf(os.Stderr, "Error unlocking vault: %v\n", err)
+			printError("Error unlocking vault: %v\n", err)
 			os.Exit(1)
 		}
 		newPass, err := auth.ConfirmPassword("[Vault] Enter new Master Password: ")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			printError("Error: %v\n", err)
 			os.Exit(1)
 		}
 		if err := vault.ChangePassword(newPass); err != nil {
-			fmt.Fprintf(os.Stderr, "Error changing password: %v\n", err)
+			printError("Error changing password: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("[Success] Master Password successfully updated and vault re-encrypted.")
@@ -253,11 +258,11 @@ func handleProfileSubcommand(vault *auth.Vault, args []string) {
 		name := args[1]
 		p, err := promptProfileConfiguration(name)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
+			printError("Configuration error: %v\n", err)
 			os.Exit(1)
 		}
 		if err := vault.SetProfile(name, p); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed saving profile: %v\n", err)
+			printError("Failed saving profile: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("[Success] Profile %q encrypted and saved into vault.\n", name)
@@ -291,12 +296,12 @@ func handleDomainSubcommand(vault *auth.Vault, args []string) {
 	profileName := args[2]
 
 	if _, ok := vault.GetProfile(profileName); !ok {
-		fmt.Fprintf(os.Stderr, "Error: profile %q does not exist in vault. Create it first via `downloader auth profile set %s`\n", profileName, profileName)
+		printError("Error: profile %q does not exist in vault. Create it first via `downloader auth profile set %s`\n", profileName, profileName)
 		os.Exit(1)
 	}
 
 	if err := vault.SetDomainDefault(domain, profileName); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed saving domain mapping: %v\n", err)
+		printError("Failed saving domain mapping: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("[Success] Domain %q successfully mapped to profile %q in encrypted vault.\n", domain, profileName)
@@ -312,11 +317,11 @@ func ensureVaultUnlocked(vault *auth.Vault) {
 		fmt.Println("[Vault] No vault found. Initializing a new encrypted credential vault.")
 		pass, err := auth.ConfirmPassword("[Vault] Enter Master Password: ")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			printError("Error: %v\n", err)
 			os.Exit(1)
 		}
 		if err := vault.Init(pass); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed initializing vault: %v\n", err)
+			printError("Failed initializing vault: %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -324,11 +329,11 @@ func ensureVaultUnlocked(vault *auth.Vault) {
 
 	pass, err := auth.PromptPassword("[Vault] Enter Master Password: ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading password: %v\n", err)
+		printError("Error reading password: %v\n", err)
 		os.Exit(1)
 	}
 	if err := vault.Unlock(pass); err != nil {
-		fmt.Fprintf(os.Stderr, "Error unlocking vault: %v\n", err)
+		printError("Error unlocking vault: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -432,13 +437,13 @@ func handleResume(args []string) {
 
 	st, err := store.DefaultStore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		printError("Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	sess, err := st.LoadSession(name)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading session: %v\n", err)
+		printError("Error loading session: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -457,7 +462,7 @@ func handleResume(args []string) {
 
 	eng := engine.NewEngine(cfg, st, authMgr, vault)
 	if err := eng.Run(context.Background(), sess); err != nil {
-		fmt.Fprintf(os.Stderr, "Run error: %v\n", err)
+		printError("Run error: %v\n", err)
 	}
 }
 
@@ -488,13 +493,13 @@ func handleDownload() {
 
 	st, err := store.DefaultStore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
+		printError("Error initializing storage: %v\n", err)
 		os.Exit(1)
 	}
 
 	jobs, err := parseURLFile(*file, *sha256Expected)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading URL file: %v\n", err)
+		printError("Error reading URL file: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -521,7 +526,7 @@ func handleDownload() {
 
 	eng := engine.NewEngine(cfg, st, authMgr, vault)
 	if err := eng.Run(context.Background(), sess); err != nil {
-		fmt.Fprintf(os.Stderr, "Download error: %v\n", err)
+		printError("Download error: %v\n", err)
 	}
 }
 
@@ -530,7 +535,7 @@ func resolvePasswordFlags(passFile string, passStdin bool) string {
 	if passFile != "" {
 		p, err := auth.ReadPasswordFromFile(passFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed reading password file: %v\n", err)
+			printError("Warning: failed reading password file: %v\n", err)
 		} else {
 			return p
 		}
@@ -538,7 +543,7 @@ func resolvePasswordFlags(passFile string, passStdin bool) string {
 	if passStdin {
 		p, err := auth.ReadPasswordFromStdin()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed reading password from stdin: %v\n", err)
+			printError("Warning: failed reading password from stdin: %v\n", err)
 		} else {
 			return p
 		}
@@ -552,7 +557,7 @@ func parseURLFile(filePath, singleSHA string) ([]*model.FileJob, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var jobs []*model.FileJob
 	scanner := bufio.NewScanner(f)
@@ -577,6 +582,7 @@ func parseURLFile(filePath, singleSHA string) ([]*model.FileJob, error) {
 			URL:            u,
 			TotalSize:      -1,
 			Status:         model.StatusPending,
+			StreamState:    model.StateIdle,
 			ExpectedSHA256: expectedHash,
 			AuthProfile:    authProfile,
 		}

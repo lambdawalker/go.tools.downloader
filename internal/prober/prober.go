@@ -76,7 +76,7 @@ func (p *Prober) ProbeURLWithAuth(ctx context.Context, targetURL string, authStr
 		headReq.Header.Set("User-Agent", "Go-Concurrent-Downloader/1.0")
 		resp, headErr := scopedClient.Do(headReq)
 		if headErr == nil {
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				p.extractMetadata(resp, result, parsedURL)
 				if result.TotalSize > 0 && result.ResolvedFilename != "" {
@@ -101,7 +101,7 @@ func (p *Prober) ProbeURLWithAuth(ctx context.Context, targetURL string, authStr
 		result.ResolvedFilename = sanitizeFilename(extractFilenameFromURL(parsedURL), "")
 		return result, fmt.Errorf("probe request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if authErr := auth.MapStatusCode(resp.StatusCode, parsedURL.Hostname(), targetURL, resp.Header, nil); authErr != nil {
 		return result, authErr
